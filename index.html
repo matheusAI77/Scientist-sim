@@ -62,14 +62,15 @@
   }
   .linha {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 6px;
   }
+  .linha.controles { grid-template-columns: repeat(3, 1fr); }
   button {
     min-height: 48px;
     min-width: 48px;
     font: inherit;
-    font-size: 15px;
+    font-size: 14px;
     color: var(--texto);
     background: var(--botao);
     border: 2px solid transparent;
@@ -83,6 +84,7 @@
     font-weight: 600;
   }
   button:active { filter: brightness(1.25); }
+  button:disabled { opacity: 0.45; }
   #aviso {
     position: absolute;
     top: 12px;
@@ -120,7 +122,7 @@
 <div id="area"><canvas id="tela"></canvas><div id="aviso"></div></div>
 <div id="barra">
   <div class="linha" id="ferramentas"></div>
-  <div class="linha">
+  <div class="linha controles">
     <button id="btLimpar">Limpar</button>
     <button id="btPausar">Pausar</button>
     <button id="btPasso">Avançar 1 tick</button>
@@ -186,6 +188,18 @@ const AVISO_MS = 3500;
 
 const BEQUER = { largura: 36, altura: 30, parede: 2 };
 const DESPEJO = { acimaDoDedo: 12, largura: 3, min: 2, max: 4, vyInicial: 1 };
+
+// Coletores: cada um só pega materiais dos estados listados.
+// Atua no mesmo ponto do despejo (acima do dedo), num círculo de "raio" células,
+// pegando no máximo "porTick" células por tick. O que é coletado vai para o estoque
+// e pode ser despejado de volta. Materiais "despejavel" têm estoque infinito.
+const COLETORES = [
+  { chave: 'PIPETA', rotulo: 'Pipeta', estados: [LIQUIDO], raio: 3, porTick: 6 },
+  { chave: 'BALAO', rotulo: 'Balão', estados: [GAS], raio: 4, porTick: 8 },
+  { chave: 'ESPATULA', rotulo: 'Espátula', estados: [PO], raio: 3, porTick: 6 },
+];
+
+const VERSAO = '0.3';
 
 /* =====================================================================
    SIMULACAO
@@ -571,24 +585,68 @@ function atualizarCelula(i, x, y) {
   else atualizarGas(i, x, y, m);
 }
 
-// ---- despejo ----
-let despejando = false;
-let materialDespejo = -1;
+// ---- despejo e coleta ----
+let acionando = false;     // dedo no canvas com ferramenta de despejo ou coleta
+let materialDespejo = -1;  // material sendo despejado (-1: nenhum)
+let coletorAtivo = -1;     // índice em COLETORES (-1: nenhum)
 let ptrX = 0, ptrY = 0;
 
+// Estoque coletado por material; "despejavel" é infinito
+const infinitoM = new Uint8Array(NM);
+for (let k = 0; k < NM; k++) infinitoM[k] = MATERIAIS[k].despejavel ? 1 : 0;
+const estoque = new Uint32Array(NM);
+let estoqueMudou = false;
+
+// Tabelas dos coletores
+const NC = COLETORES.length;
+const coletaEstado = new Uint8Array(NC * 4); // [c * 4 + estado] = 1 se coleta
+const raioC = new Uint8Array(NC);
+const porTickC = new Uint8Array(NC);
+for (let c = 0; c < NC; c++) {
+  for (const e of COLETORES[c].estados) coletaEstado[c * 4 + e] = 1;
+  raioC[c] = COLETORES[c].raio;
+  porTickC[c] = COLETORES[c].porTick;
+}
+
 function despejar() {
+  const m = materialDespejo;
   const py = ptrY - DESPEJO.acimaDoDedo;
   if (py < 0 || py >= H) return;
   const qtd = DESPEJO.min + ((rnd() * (DESPEJO.max - DESPEJO.min + 1)) | 0);
   const meia = DESPEJO.largura >> 1;
   for (let q = 0; q < qtd; q++) {
+    if (!infinitoM[m] && estoque[m] === 0) return;
     const x = ptrX - meia + ((rnd() * DESPEJO.largura) | 0);
     if (x < 0 || x >= W) continue;
     const i = py * W + x;
     if (id[i] !== AR) continue;
-    criar(i, materialDespejo);
+    criar(i, m);
     vy[i] = DESPEJO.vyInicial;
+    if (!infinitoM[m]) { estoque[m]--; estoqueMudou = true; }
   }
+}
+
+function coletar() {
+  const c = coletorAtivo;
+  const cy = ptrY - DESPEJO.acimaDoDedo;
+  const r = raioC[c], r2 = r * r, max = porTickC[c];
+  let pegou = 0;
+  for (let dy = -r; dy <= r; dy++) {
+    const y = cy + dy;
+    if (y < 0 || y >= H) continue;
+    for (let dx = -r; dx <= r; dx++) {
+      if (dx * dx + dy * dy > r2) continue;
+      const x = ptrX + dx;
+      if (x < 0 || x >= W) continue;
+      const i = y * W + x;
+      const m = id[i];
+      if (m === AR || !coletaEstado[c * 4 + estadoM[m]]) continue;
+      estoque[m]++;
+      virarAr(i);
+      if (++pegou >= max) { estoqueMudou = true; return; }
+    }
+  }
+  if (pegou > 0) estoqueMudou = true;
 }
 
 // ---- contagem ----
@@ -603,7 +661,10 @@ function contar() {
 function tick() {
   tickN++;
   tk = tickN & 255;
-  if (despejando && materialDespejo >= 0) despejar();
+  if (acionando) {
+    if (materialDespejo >= 0) despejar();
+    else if (coletorAtivo >= 0) coletar();
+  }
   for (let y = H - 1; y >= 0; y--) {
     const base = y * W;
     if (((y + tickN) & 1) === 0) {
@@ -676,14 +737,20 @@ function render() {
   octx.putImageData(imagem, 0, 0);
   ctx.drawImage(fora, 0, 0, tela.width, tela.height);
 
-  // marcador do ponto de despejo (12 células acima do dedo)
-  if (despejando && materialDespejo >= 0) {
+  // marcador do ponto de ação (12 células acima do dedo)
+  if (acionando) {
     const k = escalaPix;
     const py = ptrY - DESPEJO.acimaDoDedo;
-    const meia = DESPEJO.largura >> 1;
-    ctx.strokeStyle = '#ffd34d';
     ctx.lineWidth = Math.max(1, k >> 1);
-    ctx.strokeRect((ptrX - meia) * k, py * k, DESPEJO.largura * k, k);
+    if (materialDespejo >= 0) {
+      const meia = DESPEJO.largura >> 1;
+      ctx.strokeStyle = '#ffd34d';
+      ctx.strokeRect((ptrX - meia) * k, py * k, DESPEJO.largura * k, k);
+    } else if (coletorAtivo >= 0) {
+      const r = raioC[coletorAtivo];
+      ctx.strokeStyle = '#6fd3ff';
+      ctx.strokeRect((ptrX - r) * k, (py - r) * k, (2 * r + 1) * k, (2 * r + 1) * k);
+    }
   }
 }
 
@@ -700,7 +767,9 @@ let ferramenta = 'bequer';
 let pausado = false;
 let pausadoAuto = false;
 const botoesFerramenta = [];
+const botaoEstoque = new Array(NM).fill(null); // botão de despejo do estoque coletado
 
+// chave: 'bequer', chave de material (despejo) ou 'col:' + chave de coletor
 function addFerramenta(chave, rotulo) {
   const b = document.createElement('button');
   b.textContent = rotulo;
@@ -708,16 +777,35 @@ function addFerramenta(chave, rotulo) {
   b.addEventListener('click', () => selecionar(chave));
   caixaFerramentas.appendChild(b);
   botoesFerramenta.push(b);
+  return b;
 }
 
 function selecionar(chave) {
   ferramenta = chave;
-  materialDespejo = chave === 'bequer' ? -1 : M[chave];
+  materialDespejo = -1;
+  coletorAtivo = -1;
+  if (chave.startsWith('col:')) {
+    const k = chave.slice(4);
+    coletorAtivo = COLETORES.findIndex((c) => c.chave === k);
+  } else if (chave !== 'bequer') {
+    materialDespejo = M[chave];
+  }
   for (const b of botoesFerramenta) b.classList.toggle('ativo', b.dataset.ferramenta === chave);
+}
+
+// Botões de estoque aparecem na primeira coleta de cada material
+function atualizarEstoque() {
+  for (let k = 0; k < NM; k++) {
+    if (infinitoM[k] || (estoque[k] === 0 && !botaoEstoque[k])) continue;
+    if (!botaoEstoque[k]) botaoEstoque[k] = addFerramenta(MATERIAIS[k].chave, '');
+    botaoEstoque[k].textContent = MATERIAIS[k].nome + ' (' + estoque[k] + ')';
+    botaoEstoque[k].disabled = estoque[k] === 0;
+  }
 }
 
 addFerramenta('bequer', 'Béquer');
 for (const m of MATERIAIS) if (m.despejavel) addFerramenta(m.chave, m.rotulo || m.nome);
+for (const c of COLETORES) addFerramenta('col:' + c.chave, c.rotulo);
 selecionar('bequer');
 
 document.getElementById('btLimpar').addEventListener('click', limpar);
@@ -767,7 +855,7 @@ tela.addEventListener('pointerdown', (e) => {
   tela.setPointerCapture(e.pointerId);
   posGrid(e);
   if (ferramenta === 'bequer') carimbarBequer(ptrX, ptrY);
-  else despejando = true;
+  else acionando = true;
 });
 tela.addEventListener('pointermove', (e) => {
   if (e.pointerId !== ponteiroAtivo) return;
@@ -777,7 +865,7 @@ tela.addEventListener('pointermove', (e) => {
 function soltar(e) {
   if (e.pointerId !== ponteiroAtivo) return;
   ponteiroAtivo = -1;
-  despejando = false;
+  acionando = false;
 }
 tela.addEventListener('pointerup', soltar);
 tela.addEventListener('pointercancel', soltar);
@@ -794,7 +882,7 @@ document.addEventListener('selectstart', (e) => e.preventDefault());
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     if (!pausado) { pausado = true; pausadoAuto = true; }
-    despejando = false;
+    acionando = false;
     ponteiroAtivo = -1;
   } else if (pausadoAuto) {
     pausado = false;
@@ -836,7 +924,7 @@ function atualizarInfo() {
     txt += MATERIAIS[k].nome + ' ' + contagem[k] + '  ';
     if (k !== VIDRO) total += contagem[k];
   }
-  txt += '\nmóveis ' + total + '  |  ' + fps.toFixed(0) + ' fps  |  ' +
+  txt += '\nv' + VERSAO + '  |  móveis ' + total + '  |  ' + fps.toFixed(0) + ' fps  |  ' +
     msTick.toFixed(2) + ' ms/tick  |  tick ' + tickN + (pausado ? '  [pausado]' : '');
   info.textContent = txt;
 }
@@ -878,6 +966,10 @@ function quadro(t) {
     contagemMudou = false;
     fpsMudou = false;
     atualizarInfo();
+    if (estoqueMudou) {
+      estoqueMudou = false;
+      atualizarEstoque();
+    }
   }
   requestAnimationFrame(quadro);
 }
