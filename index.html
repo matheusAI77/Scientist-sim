@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#16181b">
+<title>Bancada</title>
+<style>
+  :root {
+    --fundo: #16181b;
+    --barra: #202327;
+    --botao: #2d3137;
+    --botaoAtivo: #3a74d8;
+    --texto: #e6e8eb;
+    --sub: #9aa0a6;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--fundo);
+    color: var(--texto);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  body {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+  }
+  #area {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  #tela {
+    display: block;
+    touch-action: none;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  #barra {
+    flex: none;
+    background: var(--barra);
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom)) 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .linha {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+  button {
+    min-height: 48px;
+    min-width: 48px;
+    font: inherit;
+    font-size: 15px;
+    color: var(--texto);
+    background: var(--botao);
+    border: 2px solid transparent;
+    border-radius: 10px;
+    padding: 4px 6px;
+    touch-action: manipulation;
+  }
+  button.ativo {
+    background: var(--botaoAtivo);
+    border-color: #9cc0ff;
+    font-weight: 600;
+  }
+  button:active { filter: brightness(1.25); }
+  #info {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--sub);
+    min-height: 2.7em;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<div id="area"><canvas id="tela"></canvas></div>
+<div id="barra">
+  <div class="linha" id="ferramentas"></div>
+  <div class="linha">
+    <button id="btLimpar">Limpar</button>
+    <button id="btPausar">Pausar</button>
+    <button id="btPasso">Avançar 1 tick</button>
+  </div>
+  <div id="info"></div>
+</div>
+<script>
+'use strict';
+
+/* =====================================================================
+   DADOS
+   Adicionar material ou reação: editar só esta seção.
+   Densidades em kg/m³ reais, mesma escala para todos os estados.
+   ===================================================================== */
+
+const ESTATICO = 0, PO = 1, LIQUIDO = 2, GAS = 3;
+
+// Sensibilidade do movimento vertical dos gases à diferença de densidade com o ar
+const K_GAS = 1.5;
+// Arrasto ao atravessar líquido: chance de avançar = |Δρ| / maior ρ * K_ARRASTO
+// (faz pó afundar devagar e líquidos de densidade parecida misturarem lentamente)
+const K_ARRASTO = 0.5;
+
+const COR_FUNDO = [24, 26, 29];
+
+const MATERIAIS = [
+  { chave: 'AR', nome: 'Ar', estado: GAS, densidade: 1.2,
+    cores: [[24, 26, 29], [24, 26, 29]], opacidade: 0,
+    difusao: 0, vida: -1 },
+
+  { chave: 'VIDRO', nome: 'Vidro', estado: ESTATICO, densidade: 2500,
+    cores: [[160, 182, 200], [190, 208, 222]], opacidade: 0.6 },
+
+  { chave: 'BICARBONATO_DE_SODIO', nome: 'Bicarbonato', rotulo: 'Bicarbonato',
+    despejavel: true, estado: PO, densidade: 2200,
+    cores: [[226, 226, 222], [255, 255, 252]], opacidade: 1,
+    atrito: 0.6, inercia: 0.3 },
+
+  { chave: 'ACIDO_ACETICO', nome: 'Ác. acético', rotulo: 'Ácido acético',
+    despejavel: true, estado: LIQUIDO, densidade: 1049,
+    cores: [[214, 162, 72], [232, 186, 98]], opacidade: 0.72,
+    viscosidade: 0.1, dispersao: 4 },
+
+  { chave: 'SOLUCAO_ACETATO', nome: 'Sol. acetato', estado: LIQUIDO, densidade: 1100,
+    cores: [[236, 230, 214], [250, 246, 234]], opacidade: 0.45,
+    viscosidade: 0.15, dispersao: 3 },
+
+  { chave: 'CO2', nome: 'CO2', estado: GAS, densidade: 1.98,
+    cores: [[140, 182, 240], [175, 205, 250]], opacidade: 0.55,
+    difusao: 0.5, vida: 900 },
+];
+
+const REACOES = [
+  { a: 'BICARBONATO_DE_SODIO', b: 'ACIDO_ACETICO',
+    produtoA: 'SOLUCAO_ACETATO', produtoB: 'CO2', taxa: 0.08 },
+];
+
+const BEQUER = { largura: 36, altura: 30, parede: 2 };
+const DESPEJO = { acimaDoDedo: 12, largura: 3, min: 2, max: 4, vyInicial: 1 };
+
+/* =====================================================================
+   SIMULACAO
+   ===================================================================== */
+
+const W = 120, H = 180, N = W * H;
+const TICKS_POR_SEG = 60;
+const PASSO_MS = 1000 / TICKS_POR_SEG;
+const MAX_TICKS_POR_FRAME = 4;
+const VY_MAX = 4;
+
+// Direções para podeTrocar
+const BAIXO = 0, LADO = 1, CIMA = 2;
+
+// ---- tabelas por material (derivadas de DADOS) ----
+const NM = MATERIAIS.length;
+const M = {};
+for (let k = 0; k < NM; k++) M[MATERIAIS[k].chave] = k;
+const AR = M.AR;
+const VIDRO = M.VIDRO;
+const DENS_AR = MATERIAIS[AR].densidade;
+
+const estadoM = new Uint8Array(NM);
+const densM = new Float32Array(NM);
+const viscM = new Float32Array(NM);
+const dispM = new Uint8Array(NM);
+const atritoM = new Float32Array(NM);
+const inerciaM = new Float32Array(NM);
+const difusaoM = new Float32Array(NM);
+const vidaM = new Int32Array(NM);
+const chanceVertM = new Float32Array(NM); // gás: chance de mover na vertical por tick
+const sentidoM = new Int8Array(NM);       // gás: +1 desce, -1 sobe, 0 neutro
+
+for (let k = 0; k < NM; k++) {
+  const m = MATERIAIS[k];
+  estadoM[k] = m.estado;
+  densM[k] = m.densidade;
+  viscM[k] = m.viscosidade || 0;
+  dispM[k] = m.dispersao || 0;
+  atritoM[k] = m.atrito || 0;
+  inerciaM[k] = m.inercia || 0;
+  difusaoM[k] = m.difusao || 0;
+  vidaM[k] = m.vida === undefined ? -1 : m.vida;
+  if (m.estado === GAS) {
+    const d = m.densidade - DENS_AR;
+    chanceVertM[k] = Math.min(0.9, Math.abs(d) / DENS_AR * K_GAS);
+    sentidoM[k] = d > 0 ? 1 : (d < 0 ? -1 : 0);
+  }
+}
+
+// Reações: matriz [a * NM + b] -> índice da reação (ou -1)
+const NR = REACOES.length;
+const reacMat = new Int16Array(NM * NM).fill(-1);
+const temReacao = new Uint8Array(NM);
+const taxaR = new Float32Array(NR);
+const prodAR = new Uint8Array(NR);
+const prodBR = new Uint8Array(NR);
+for (let r = 0; r < NR; r++) {
+  const R = REACOES[r];
+  const a = M[R.a], b = M[R.b];
+  reacMat[a * NM + b] = r;
+  temReacao[a] = 1;
+  taxaR[r] = R.taxa;
+  prodAR[r] = M[R.produtoA];
+  prodBR[r] = M[R.produtoB];
+}
+
+// ---- grid: arrays tipados paralelos ----
+const id = new Uint8Array(N);
+const vy = new Int8Array(N);
+const vx = new Int8Array(N);
+const clock = new Uint8Array(N);
+const vida = new Uint16Array(N);
+const shade = new Uint8Array(N);
+const temp = new Float32Array(N); // reservado, não simulado nesta etapa
+
+// ---- PRNG com seed (mulberry32) ----
+let semente = 20260614 >>> 0;
+function rnd() {
+  semente = (semente + 0x6D2B79F5) | 0;
+  let t = semente;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+let tickN = 0;  // contador global de ticks
+let tk = 0;     // tickN & 255, comparado com clock
+
+function criar(i, m) {
+  id[i] = m;
+  vy[i] = 0;
+  vx[i] = 0;
+  clock[i] = tk;
+  vida[i] = vidaM[m] > 0 ? vidaM[m] : 0;
+  shade[i] = (rnd() * 256) | 0;
+}
+
+function virarAr(i) {
+  id[i] = AR;
+  vy[i] = 0;
+  vx[i] = 0;
+  vida[i] = 0;
+  clock[i] = tk;
+}
+
+function trocar(a, b) {
+  let t;
+  t = id[a]; id[a] = id[b]; id[b] = t;
+  t = vy[a]; vy[a] = vy[b]; vy[b] = t;
+  t = vx[a]; vx[a] = vx[b]; vx[b] = t;
+  t = vida[a]; vida[a] = vida[b]; vida[b] = t;
+  t = shade[a]; shade[a] = shade[b]; shade[b] = t;
+  t = temp[a]; temp[a] = temp[b]; temp[b] = t;
+  clock[a] = tk;
+  clock[b] = tk;
+}
+
+// Regra de densidade pura, sem sorteio
+function cabe(m, alvo, direcao) {
+  const a = id[alvo];
+  if (a === m) return false;
+  const ea = estadoM[a];
+  if (ea !== LIQUIDO && ea !== GAS) return false;
+  if (direcao === CIMA) return densM[a] > densM[m];
+  return densM[a] < densM[m];
+}
+
+// Regra geral de deslocamento: densidade + viscosidade/arrasto do meio líquido
+function podeTrocar(origem, alvo, direcao) {
+  const m = id[origem];
+  if (!cabe(m, alvo, direcao)) return false;
+  const a = id[alvo];
+  if (estadoM[a] === LIQUIDO) {
+    if (rnd() < viscM[a]) return false;
+    const dO = densM[m], dA = densM[a];
+    const arrasto = (dO > dA ? dO - dA : dA - dO) / (dO > dA ? dO : dA) * K_ARRASTO;
+    if (rnd() >= arrasto) return false;
+  }
+  return true;
+}
+
+// ---- reações ----
+function tentarReacao(i, j, base) {
+  const r = reacMat[base + id[j]];
+  if (r < 0 || rnd() >= taxaR[r]) return false;
+  criar(i, prodAR[r]);
+  criar(j, prodBR[r]);
+  return true;
+}
+
+function reagir(i, x, y, m) {
+  const base = m * NM;
+  if (y > 0 && tentarReacao(i, i - W, base)) return true;
+  if (y < H - 1 && tentarReacao(i, i + W, base)) return true;
+  if (x > 0 && tentarReacao(i, i - 1, base)) return true;
+  if (x < W - 1 && tentarReacao(i, i + 1, base)) return true;
+  return false;
+}
+
+// ---- queda acelerada comum a pó e líquido ----
+// Retorna true se moveu.
+function cair(i, y) {
+  const vAnt = vy[i];
+  const v = vAnt < VY_MAX ? vAnt + 1 : VY_MAX;
+  let cur = i, cy = y, desceu = 0, emLiquido = false;
+  while (desceu < v && cy < H - 1) {
+    const j = cur + W;
+    if (!podeTrocar(cur, j, BAIXO)) break;
+    emLiquido = estadoM[id[j]] === LIQUIDO;
+    trocar(cur, j);
+    cur = j; cy++; desceu++;
+    if (emLiquido) break; // dentro de líquido anda no máximo 1 célula por tick
+  }
+  if (desceu === 0) return false;
+  // completou a queda: guarda vy; bloqueou no caminho: vy mínimo (zera no próximo tick)
+  vy[cur] = emLiquido ? 1 : (desceu === v ? v : 1);
+  return true;
+}
+
+function diagonalBaixo(i, x, d) {
+  const nx = x + d;
+  if (nx < 0 || nx >= W) return -1;
+  const j = i + W + d;
+  if (!podeTrocar(i, j, BAIXO)) return -1;
+  trocar(i, j);
+  return j;
+}
+
+function diagonalCima(i, x, d) {
+  const nx = x + d;
+  if (nx < 0 || nx >= W) return false;
+  const j = i - W + d;
+  if (!podeTrocar(i, j, CIMA)) return false;
+  trocar(i, j);
+  return true;
+}
+
+// ---- pó ----
+function atualizarPo(i, x, y, m) {
+  const vyAnt = vy[i];
+  if (cair(i, y)) return;
+
+  vy[i] = 0;
+  const acabouDeCair = vyAnt > 0;
+  const chance = acabouDeCair ? 1 - atritoM[m] * 0.35 : 1 - atritoM[m];
+
+  if (y < H - 1 && rnd() < chance) {
+    const d = rnd() < 0.5 ? -1 : 1;
+    let j = diagonalBaixo(i, x, d);
+    let s = d;
+    if (j < 0) { j = diagonalBaixo(i, x, -d); s = -d; }
+    if (j >= 0) {
+      vx[j] = s;
+      vy[j] = 1; // continua "rolando" no próximo tick
+      return;
+    }
+  }
+
+  // inércia: ao aterrissar, escorrega 1 ou 2 células para o lado
+  if (acabouDeCair && rnd() < inerciaM[m]) {
+    let s = vx[i];
+    if (s === 0) s = rnd() < 0.5 ? -1 : 1;
+    const passos = rnd() < 0.5 ? 1 : 2;
+    let cur = i, cx = x;
+    for (let k = 0; k < passos; k++) {
+      const nx = cx + s;
+      if (nx < 0 || nx >= W) break;
+      if (!podeTrocar(cur, cur + s, LADO)) break;
+      trocar(cur, cur + s);
+      cur += s; cx = nx;
+    }
+    vx[cur] = 0;
+    clock[cur] = tk;
+    return;
+  }
+
+  vx[i] = 0;
+  clock[i] = tk;
+}
+
+// ---- líquido ----
+function atualizarLiquido(i, x, y, m) {
+  if (rnd() < viscM[m]) { clock[i] = tk; return; }
+  if (cair(i, y)) return;
+  vy[i] = 0;
+
+  if (y < H - 1) {
+    const d = rnd() < 0.5 ? -1 : 1;
+    let j = diagonalBaixo(i, x, d);
+    if (j < 0) j = diagonalBaixo(i, x, -d);
+    if (j >= 0) return;
+  }
+
+  // espalhamento horizontal
+  let s = vx[i];
+  if (s === 0) s = rnd() < 0.5 ? -1 : 1;
+  const n = dispM[m];
+  const apoiadoEmLiquido = y < H - 1 && estadoM[id[i + W]] === LIQUIDO;
+  // Sobre o próprio líquido procura desnível na linha inteira, mas anda no máximo
+  // "dispersao" células por tick: degraus somem e a superfície fica plana.
+  // Sem desnível, não anda: nada de tremor eterno.
+  // Sobre sólido espalha livremente (até "dispersao") para cobrir o fundo.
+  const alcance = apoiadoEmLiquido ? W : n;
+  let cx = x, k = 0, desnivel = -1, bateu = false;
+  while (k < alcance) {
+    const nx = cx + s;
+    if (nx < 0 || nx >= W || !cabe(m, i + s * (k + 1), LADO)) { bateu = true; break; }
+    cx = nx; k++;
+    if (y < H - 1 && cabe(m, i + s * k + W, BAIXO)) { desnivel = k; break; }
+  }
+  let passos = 0;
+  if (desnivel > 0) passos = desnivel < n ? desnivel : n;
+  else if (!apoiadoEmLiquido) passos = k;
+
+  if (passos > 0) {
+    const destino = i + s * passos;
+    if (podeTrocar(i, destino, LADO)) {
+      trocar(i, destino);
+      vx[destino] = bateu && desnivel < 0 ? -s : s;
+      return;
+    }
+  }
+  vx[i] = bateu && desnivel < 0 ? -s : s;
+  clock[i] = tk;
+}
+
+// ---- gás ----
+function moverGasVertical(i, x, y, sentido) {
+  const ny = y + sentido;
+  const dir = sentido > 0 ? BAIXO : CIMA;
+  const d = rnd() < 0.5 ? -1 : 1;
+  if (ny < 0) { virarAr(i); return true; } // saiu pelo topo
+  if (ny < H) {
+    const j = i + sentido * W;
+    if (podeTrocar(i, j, dir)) { trocar(i, j); return true; }
+    for (let q = 0; q < 2; q++) {
+      const s = q === 0 ? d : -d;
+      const nx = x + s;
+      if (nx < 0 || nx >= W) { virarAr(i); return true; } // saiu pela lateral
+      if (podeTrocar(i, j + s, dir)) { trocar(i, j + s); return true; }
+    }
+  }
+  for (let q = 0; q < 2; q++) {
+    const s = q === 0 ? d : -d;
+    const nx = x + s;
+    if (nx < 0 || nx >= W) { virarAr(i); return true; }
+    if (podeTrocar(i, i + s, LADO)) { trocar(i, i + s); return true; }
+  }
+  return false;
+}
+
+function difundir(i, x, y, m) {
+  const k = (rnd() * 4) | 0;
+  let j;
+  if (k === 0) { if (y === 0) { virarAr(i); return true; } j = i - W; }
+  else if (k === 1) { if (y === H - 1) return false; j = i + W; }
+  else if (k === 2) { if (x === 0) { virarAr(i); return true; } j = i - 1; }
+  else { if (x === W - 1) { virarAr(i); return true; } j = i + 1; }
+  const a = id[j];
+  if (a === m || estadoM[a] !== GAS) return false;
+  trocar(i, j);
+  return true;
+}
+
+function atualizarGas(i, x, y, m) {
+  // bolha: líquido logo acima -> sempre tenta subir, com leve deriva lateral
+  if (y > 0 && estadoM[id[i - W]] === LIQUIDO) {
+    const d = rnd() < 0.5 ? -1 : 1;
+    if (rnd() < 0.25 && diagonalCima(i, x, d)) return;
+    if (podeTrocar(i, i - W, CIMA)) { trocar(i, i - W); return; }
+    if (diagonalCima(i, x, d) || diagonalCima(i, x, -d)) return;
+    clock[i] = tk;
+    return;
+  }
+
+  // vida: diluição no ar
+  if (vidaM[m] > 0) {
+    if (vida[i] <= 1) { virarAr(i); return; }
+    vida[i]--;
+  }
+
+  const sentido = sentidoM[m];
+  if (sentido !== 0 && rnd() < chanceVertM[m]) {
+    if (moverGasVertical(i, x, y, sentido)) return;
+  }
+  if (rnd() < difusaoM[m]) {
+    if (difundir(i, x, y, m)) return;
+  }
+  clock[i] = tk;
+}
+
+function atualizarCelula(i, x, y) {
+  const m = id[i];
+  if (m === AR) return;
+  const e = estadoM[m];
+  if (e === ESTATICO) return;
+  if (clock[i] === tk) return;
+  if (temReacao[m] && reagir(i, x, y, m)) return;
+  if (e === PO) atualizarPo(i, x, y, m);
+  else if (e === LIQUIDO) atualizarLiquido(i, x, y, m);
+  else atualizarGas(i, x, y, m);
+}
+
+// ---- despejo ----
+let despejando = false;
+let materialDespejo = -1;
+let ptrX = 0, ptrY = 0;
+
+function despejar() {
+  const py = ptrY - DESPEJO.acimaDoDedo;
+  if (py < 0 || py >= H) return;
+  const qtd = DESPEJO.min + ((rnd() * (DESPEJO.max - DESPEJO.min + 1)) | 0);
+  const meia = DESPEJO.largura >> 1;
+  for (let q = 0; q < qtd; q++) {
+    const x = ptrX - meia + ((rnd() * DESPEJO.largura) | 0);
+    if (x < 0 || x >= W) continue;
+    const i = py * W + x;
+    if (id[i] !== AR) continue;
+    criar(i, materialDespejo);
+    vy[i] = DESPEJO.vyInicial;
+  }
+}
+
+// ---- contagem ----
+const contagem = new Uint32Array(NM);
+let contagemMudou = false;
+function contar() {
+  contagem.fill(0);
+  for (let i = 0; i < N; i++) contagem[id[i]]++;
+  contagemMudou = true;
+}
+
+function tick() {
+  tickN++;
+  tk = tickN & 255;
+  if (despejando && materialDespejo >= 0) despejar();
+  for (let y = H - 1; y >= 0; y--) {
+    const base = y * W;
+    if (((y + tickN) & 1) === 0) {
+      for (let x = 0; x < W; x++) atualizarCelula(base + x, x, y);
+    } else {
+      for (let x = W - 1; x >= 0; x--) atualizarCelula(base + x, x, y);
+    }
+  }
+  if (tickN % 10 === 0) contar();
+}
+
+// ---- béquer e limpeza ----
+function carimbarBequer(cx, cy) {
+  for (let i = 0; i < N; i++) if (id[i] === VIDRO) virarAr(i);
+  const L = BEQUER.largura, A = BEQUER.altura, p = BEQUER.parede;
+  let x0 = cx - (L >> 1), y0 = cy - (A >> 1);
+  if (x0 < 0) x0 = 0;
+  if (x0 > W - L) x0 = W - L;
+  if (y0 < 0) y0 = 0;
+  if (y0 > H - A) y0 = H - A;
+  for (let y = y0; y < y0 + A; y++) {
+    for (let x = x0; x < x0 + L; x++) {
+      const i = y * W + x;
+      const parede = x < x0 + p || x >= x0 + L - p || y >= y0 + A - p;
+      if (parede) criar(i, VIDRO);
+      else virarAr(i);
+    }
+  }
+  contar();
+}
+
+function limpar() {
+  for (let i = 0; i < N; i++) if (id[i] !== VIDRO) virarAr(i);
+  contar();
+}
+
+/* =====================================================================
+   RENDER
+   ===================================================================== */
+
+const tela = document.getElementById('tela');
+const ctx = tela.getContext('2d', { alpha: false });
+const fora = document.createElement('canvas');
+fora.width = W;
+fora.height = H;
+const octx = fora.getContext('2d');
+const imagem = octx.createImageData(W, H);
+const pix = new Uint32Array(imagem.data.buffer);
+
+// Paleta: 16 variações por material, já misturadas com o fundo (ABGR little-endian)
+const paleta = new Uint32Array(NM * 16);
+for (let k = 0; k < NM; k++) {
+  const m = MATERIAIS[k];
+  const op = m.opacidade;
+  for (let s = 0; s < 16; s++) {
+    const t = s / 15;
+    let rgb = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const base = m.cores[0][c] + (m.cores[1][c] - m.cores[0][c]) * t;
+      rgb[c] = Math.round(base * op + COR_FUNDO[c] * (1 - op));
+    }
+    paleta[k * 16 + s] = (255 << 24 | rgb[2] << 16 | rgb[1] << 8 | rgb[0]) >>> 0;
+  }
+}
+
+let escalaPix = 1; // pixels do backing store por célula
+
+function render() {
+  for (let i = 0; i < N; i++) pix[i] = paleta[(id[i] << 4) | (shade[i] & 15)];
+  octx.putImageData(imagem, 0, 0);
+  ctx.drawImage(fora, 0, 0, tela.width, tela.height);
+
+  // marcador do ponto de despejo (12 células acima do dedo)
+  if (despejando && materialDespejo >= 0) {
+    const k = escalaPix;
+    const py = ptrY - DESPEJO.acimaDoDedo;
+    const meia = DESPEJO.largura >> 1;
+    ctx.strokeStyle = '#ffd34d';
+    ctx.lineWidth = Math.max(1, k >> 1);
+    ctx.strokeRect((ptrX - meia) * k, py * k, DESPEJO.largura * k, k);
+  }
+}
+
+/* =====================================================================
+   UI
+   ===================================================================== */
+
+const area = document.getElementById('area');
+const info = document.getElementById('info');
+const caixaFerramentas = document.getElementById('ferramentas');
+const btPausar = document.getElementById('btPausar');
+
+let ferramenta = 'bequer';
+let pausado = false;
+let pausadoAuto = false;
+const botoesFerramenta = [];
+
+function addFerramenta(chave, rotulo) {
+  const b = document.createElement('button');
+  b.textContent = rotulo;
+  b.dataset.ferramenta = chave;
+  b.addEventListener('click', () => selecionar(chave));
+  caixaFerramentas.appendChild(b);
+  botoesFerramenta.push(b);
+}
+
+function selecionar(chave) {
+  ferramenta = chave;
+  materialDespejo = chave === 'bequer' ? -1 : M[chave];
+  for (const b of botoesFerramenta) b.classList.toggle('ativo', b.dataset.ferramenta === chave);
+}
+
+addFerramenta('bequer', 'Béquer');
+for (const m of MATERIAIS) if (m.despejavel) addFerramenta(m.chave, m.rotulo || m.nome);
+selecionar('bequer');
+
+document.getElementById('btLimpar').addEventListener('click', limpar);
+btPausar.addEventListener('click', () => {
+  pausado = !pausado;
+  pausadoAuto = false;
+  btPausar.textContent = pausado ? 'Continuar' : 'Pausar';
+  btPausar.classList.toggle('ativo', pausado);
+});
+document.getElementById('btPasso').addEventListener('click', () => {
+  if (!pausado) btPausar.click();
+  const t0 = performance.now();
+  tick();
+  msTick = performance.now() - t0;
+  contar();
+});
+
+// ---- escala do canvas ----
+function ajustarTela() {
+  const aw = area.clientWidth, ah = area.clientHeight;
+  let s = Math.floor(Math.min(aw / W, ah / H));
+  if (s < 1) s = Math.min(aw / W, ah / H);
+  const dpr = window.devicePixelRatio || 1;
+  escalaPix = Math.max(1, Math.round(s * dpr));
+  tela.width = W * escalaPix;
+  tela.height = H * escalaPix;
+  tela.style.width = (W * s) + 'px';
+  tela.style.height = (H * s) + 'px';
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', ajustarTela);
+window.addEventListener('orientationchange', () => setTimeout(ajustarTela, 100));
+if (window.visualViewport) window.visualViewport.addEventListener('resize', ajustarTela);
+
+// ---- toque / mouse ----
+function posGrid(e) {
+  const r = tela.getBoundingClientRect();
+  ptrX = Math.floor((e.clientX - r.left) / r.width * W);
+  ptrY = Math.floor((e.clientY - r.top) / r.height * H);
+}
+
+let ponteiroAtivo = -1;
+tela.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  if (ponteiroAtivo !== -1) return;
+  ponteiroAtivo = e.pointerId;
+  tela.setPointerCapture(e.pointerId);
+  posGrid(e);
+  if (ferramenta === 'bequer') carimbarBequer(ptrX, ptrY);
+  else despejando = true;
+});
+tela.addEventListener('pointermove', (e) => {
+  if (e.pointerId !== ponteiroAtivo) return;
+  e.preventDefault();
+  posGrid(e);
+});
+function soltar(e) {
+  if (e.pointerId !== ponteiroAtivo) return;
+  ponteiroAtivo = -1;
+  despejando = false;
+}
+tela.addEventListener('pointerup', soltar);
+tela.addEventListener('pointercancel', soltar);
+tela.addEventListener('lostpointercapture', soltar);
+
+// bloqueia scroll, zoom por pinça, seleção e menu de toque longo
+document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('dblclick', (e) => e.preventDefault());
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+document.addEventListener('selectstart', (e) => e.preventDefault());
+
+// ---- pausa automática ----
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (!pausado) { pausado = true; pausadoAuto = true; }
+    despejando = false;
+    ponteiroAtivo = -1;
+  } else if (pausadoAuto) {
+    pausado = false;
+    pausadoAuto = false;
+  }
+  acumulador = 0;
+  ultimo = performance.now();
+});
+
+// ---- info de debug ----
+let msTick = 0;
+let fps = 0, quadros = 0, inicioFps = performance.now();
+let fpsMudou = false;
+
+function atualizarInfo() {
+  let txt = '';
+  let total = 0;
+  for (let k = 0; k < NM; k++) {
+    if (k === AR) continue;
+    txt += MATERIAIS[k].nome + ' ' + contagem[k] + '  ';
+    if (k !== VIDRO) total += contagem[k];
+  }
+  txt += '\nmóveis ' + total + '  |  ' + fps.toFixed(0) + ' fps  |  ' +
+    msTick.toFixed(2) + ' ms/tick  |  tick ' + tickN + (pausado ? '  [pausado]' : '');
+  info.textContent = txt;
+}
+
+// ---- loop ----
+let ultimo = performance.now();
+let acumulador = 0;
+
+function quadro(t) {
+  let dt = t - ultimo;
+  ultimo = t;
+  if (dt > 250) dt = 250;
+  if (dt < 0) dt = 0;
+
+  if (!pausado) {
+    acumulador += dt;
+    let n = 0;
+    const t0 = performance.now();
+    while (acumulador >= PASSO_MS && n < MAX_TICKS_POR_FRAME) {
+      tick();
+      acumulador -= PASSO_MS;
+      n++;
+    }
+    if (n > 0) msTick = msTick * 0.9 + ((performance.now() - t0) / n) * 0.1;
+    if (acumulador > PASSO_MS) acumulador = PASSO_MS;
+  }
+
+  render();
+
+  quadros++;
+  if (t - inicioFps >= 1000) {
+    fps = quadros * 1000 / (t - inicioFps);
+    quadros = 0;
+    inicioFps = t;
+    fpsMudou = true;
+  }
+  if (contagemMudou || fpsMudou) {
+    contagemMudou = false;
+    fpsMudou = false;
+    atualizarInfo();
+  }
+  requestAnimationFrame(quadro);
+}
+
+for (let i = 0; i < N; i++) { id[i] = AR; shade[i] = (rnd() * 256) | 0; }
+ajustarTela();
+contar();
+requestAnimationFrame((t) => { ultimo = t; quadro(t); });
+</script>
+</body>
+</html>
