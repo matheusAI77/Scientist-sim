@@ -55,10 +55,10 @@
   #barra {
     flex: none;
     background: var(--barra);
-    padding: 8px 8px calc(8px + env(safe-area-inset-bottom)) 8px;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom)) 6px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
   }
   .linha {
     display: grid;
@@ -110,8 +110,8 @@
   }
   #info {
     font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 11px;
-    line-height: 1.35;
+    font-size: 10px;
+    line-height: 1.3;
     color: var(--sub);
     min-height: 2.7em;
     white-space: pre-wrap;
@@ -199,7 +199,7 @@ const COLETORES = [
   { chave: 'ESPATULA', rotulo: 'Espátula', estados: [PO], raio: 3, porTick: 6 },
 ];
 
-const VERSAO = '0.3';
+const VERSAO = '0.4';
 
 /* =====================================================================
    SIMULACAO
@@ -826,14 +826,15 @@ document.getElementById('btPasso').addEventListener('click', () => {
 // ---- escala do canvas ----
 function ajustarTela() {
   const aw = area.clientWidth, ah = area.clientHeight;
-  let s = Math.floor(Math.min(aw / W, ah / H));
-  if (s < 1) s = Math.min(aw / W, ah / H);
+  // Escala fracionada: ocupa todo o espaço disponível. O backing store usa um
+  // inteiro de pixels de tela por célula; o navegador faz o ajuste final.
+  const s = Math.min(aw / W, ah / H);
   const dpr = window.devicePixelRatio || 1;
   escalaPix = Math.max(1, Math.round(s * dpr));
   tela.width = W * escalaPix;
   tela.height = H * escalaPix;
-  tela.style.width = (W * s) + 'px';
-  tela.style.height = (H * s) + 'px';
+  tela.style.width = Math.floor(W * s) + 'px';
+  tela.style.height = Math.floor(H * s) + 'px';
   ctx.imageSmoothingEnabled = false;
 }
 window.addEventListener('resize', ajustarTela);
